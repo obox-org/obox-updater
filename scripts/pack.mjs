@@ -12,8 +12,8 @@ const manifest = JSON.parse(readFileSync(join(root, 'manifest.json'), 'utf8'))
 const name = manifest.name
 const version = manifest.version
 
-// 入口固定文件（图标缺失时自动跳过）
-const rootFiles = ['manifest.json', 'index.js', 'icon.svg', 'icon.png'].filter((f) =>
+// 入口固定文件（图标/LICENSE 缺失时自动跳过）
+const rootFiles = ['manifest.json', 'index.js', 'icon.svg', 'icon.png', 'LICENSE'].filter((f) =>
   existsSync(join(root, f))
 )
 
