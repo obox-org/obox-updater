@@ -1,0 +1,14 @@
+{
+  "name": "obox-updater-ext",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Obox 更新提供者扩展：从 GitHub Release（obox-org/obox-release）拉取并安装 obox 更新。",
+  "type": "module",
+  "scripts": {
+    "pack": "node scripts/pack.mjs",
+    "release": "npm run pack"
+  },
+  "devDependencies": {
+    "adm-zip": "^0.6.0"
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "name": "obox-updater",
+  "version": "1.0.0",
+  "displayName": "Obox 更新",
+  "author": "obox-org",
+  "description": "从 GitHub Release 拉取并安装 obox 更新（更新提供者扩展）",
+  "main": "./index.js",
+  "contributes": {
+    "updater": {
+      "feedUrl": "https://github.com/obox-org/obox-release/releases/latest/download/"
+    },
+    "commands": [
+      {
+        "command": "obox-updater.check",
+        "title": "检查 Obox 更新",
+        "category": "更新",
+        "palette": true
+      }
+    ],
+    "statusBarItems": [
+      {
+        "id": "obox-updater.status",
+        "name": "更新状态",
+        "text": "",
+        "alignment": "right",
+        "priority": 5,
+        "command": "obox-updater.check"
+      }
+    ]
+  }
+}
