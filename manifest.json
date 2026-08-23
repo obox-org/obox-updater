@@ -7,7 +7,7 @@
   "main": "./index.js",
   "contributes": {
     "updater": {
-      "feedUrl": "https://github.com/obox-org/obox-release/releases/latest/download/"
+      "feedUrl": "https://github.com/obox-org/obox/releases/latest/download/"
     },
     "commands": [
       {

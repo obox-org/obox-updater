@@ -1,6 +1,6 @@
 /**
  * Obox 更新提供者扩展（非内置）。
- * 从 GitHub Release（obox-org/obox-release）拉取 obox 更新：
+ * 从 GitHub Release（obox-org/obox）拉取 obox 更新：
  * - 经 manifest contributes.updater.feedUrl 提供更新源
  * - 在"设置-更新"选中本扩展后生效（只能一个更新提供者）
  * - 提供命令"检查 Obox 更新"与状态栏项，调用 api.update 检查/下载/安装
@@ -9,7 +9,7 @@
  */
 
 // GitHub Release 的 latest.yml 与安装包（与 manifest feedUrl 对应）
-const FEED_URL = 'https://github.com/obox-org/obox-release/releases/latest/download/'
+const FEED_URL = 'https://github.com/obox-org/obox/releases/latest/download/'
 
 export default function oboxUpdater(api) {
   // 状态栏：显示当前 obox 版本
