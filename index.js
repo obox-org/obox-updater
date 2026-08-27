@@ -1,15 +1,18 @@
 /**
  * Obox 更新提供者扩展（非内置）。
  * 从 GitHub Release（obox-org/obox）拉取 obox 更新：
- * - 经 manifest contributes.updater.feedUrl 提供更新源
+ * - 先经 api.update.resolveFeed 解析"最后一次编译"的 release（按创建时间最新，不依赖 latest 标记）
+ * - 再用解析出的更新源调 api.update.check 检查/下载/安装
  * - 在"设置-更新"选中本扩展后生效（只能一个更新提供者）
- * - 提供命令"检查 Obox 更新"与状态栏项，调用 api.update 检查/下载/安装
+ * - 提供命令"检查 Obox 更新"与状态栏项
  *
  * 注意：用户扩展入口为纯 ESM JavaScript（宿主动态 import，无构建转换）。
  */
 
-// GitHub Release 的 latest.yml 与安装包（与 manifest feedUrl 对应）
-const FEED_URL = 'https://github.com/obox-org/obox/releases/latest/download/'
+// obox 发布仓库（release 资产：x64/arm64 安装包 + latest.yml / latest-arm64.yml）
+const REPO = 'obox-org/obox'
+// 兜底更新源：仅当宿主无 api.update.resolveFeed（旧版本 obox）时使用（依赖 latest 标记）
+const FALLBACK_FEED_URL = 'https://github.com/obox-org/obox/releases/latest/download/'
 
 export default function oboxUpdater(api) {
   // 状态栏：显示当前 obox 版本
@@ -23,7 +26,18 @@ export default function oboxUpdater(api) {
   const check = api.registerCommand('obox-updater.check', async () => {
     api.statusBar.setText('obox-updater.status', '检查更新…')
     try {
-      const result = await api.update.check(FEED_URL)
+      // 1) 解析最后一次编译的 release 更新源（旧宿主无 resolveFeed 时回退 latest/download）
+      let feedUrl = FALLBACK_FEED_URL
+      if (typeof api.update.resolveFeed === 'function') {
+        const resolved = await api.update.resolveFeed(REPO)
+        if (!resolved.ok) {
+          api.statusBar.setText('obox-updater.status', `解析更新源失败: ${resolved.error}`)
+          return
+        }
+        feedUrl = resolved.feedUrl
+      }
+      // 2) 检查更新
+      const result = await api.update.check(feedUrl)
       if (!result.ok) {
         api.statusBar.setText('obox-updater.status', `更新失败: ${result.error}`)
         return

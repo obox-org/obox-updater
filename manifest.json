@@ -1,8 +1,9 @@
 {
   "name": "obox-updater",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "displayName": "Obox 更新",
   "author": "obox-org",
+  "apiVersion": 1,
   "description": "从 GitHub Release 拉取并安装 obox 更新（更新提供者扩展）",
   "main": "./index.js",
   "contributes": {

@@ -21,7 +21,8 @@ const flush = () => new Promise((resolve) => setImmediate(resolve))
 
 /**
  * 构造 mock api。
- * overrides 可注入：version、check(feedUrl)、download()（可返回/抛错）。
+ * overrides 可注入：version、resolveFeed(repo)、check(feedUrl)、download()（可返回/抛错）；
+ * noResolveFeed: true 模拟旧宿主（api.update 无 resolveFeed）。
  */
 function createMockApi(overrides = {}) {
   const state = {
@@ -32,7 +33,8 @@ function createMockApi(overrides = {}) {
     eventListener: null,
     disposed: { check: false, off: false },
     checkCalls: [],
-    downloadCalls: 0
+    downloadCalls: 0,
+    resolveFeedCalls: []
   }
   const api = {
     statusBar: {
@@ -47,6 +49,20 @@ function createMockApi(overrides = {}) {
     },
     update: {
       getVersion: async () => overrides.version ?? '1.0.0',
+      ...(overrides.noResolveFeed
+        ? {}
+        : {
+            resolveFeed: async (repo) => {
+              state.resolveFeedCalls.push(repo)
+              return overrides.resolveFeed
+                ? await overrides.resolveFeed(repo)
+                : {
+                    ok: true,
+                    tag: 'v1.1.0',
+                    feedUrl: 'https://github.com/obox-org/obox/releases/download/v1.1.0/'
+                  }
+            }
+          }),
       check: async (feedUrl) => {
         state.checkCalls.push(feedUrl)
         return overrides.check ? await overrides.check(feedUrl) : { ok: true, available: false }
@@ -176,10 +192,27 @@ test('事件：error → 显示更新错误', () => {
   assert.equal(state.statusText, '更新错误: 签名校验失败')
 })
 
-test('检查命令使用 manifest 的 feedUrl（硬编码一致性）', async () => {
+test('检查：先解析最后一次编译的 release，再用其 feedUrl 检查更新', async () => {
   const { state } = await runCheck()
+  assert.equal(state.resolveFeedCalls.length, 1)
+  assert.equal(state.resolveFeedCalls[0], 'obox-org/obox')
   assert.equal(state.checkCalls.length, 1)
-  assert.equal(state.checkCalls[0], manifest.contributes.updater.feedUrl)
+  assert.equal(state.checkCalls[0], 'https://github.com/obox-org/obox/releases/download/v1.1.0/')
+})
+
+test('检查：解析更新源失败 → 状态栏提示且不执行检查', async () => {
+  const { state } = await runCheck({
+    resolveFeed: async () => ({ ok: false, error: 'GitHub API 返回 403' })
+  })
+  assert.equal(state.statusText, '解析更新源失败: GitHub API 返回 403')
+  assert.equal(state.checkCalls.length, 0)
+})
+
+test('检查：旧宿主无 resolveFeed → 回退 manifest 的 latest/download 更新源', async () => {
+  const { state } = await runCheck({ noResolveFeed: true })
+  assert.equal(state.resolveFeedCalls.length, 0)
+  assert.equal(state.checkCalls.length, 1)
+  assert.equal(state.checkCalls[0], 'https://github.com/obox-org/obox/releases/latest/download/')
   assert.equal(
     manifest.contributes.updater.feedUrl,
     'https://github.com/obox-org/obox/releases/latest/download/'
