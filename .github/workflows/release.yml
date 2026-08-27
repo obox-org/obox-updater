@@ -26,11 +26,8 @@ jobs:
         with:
           node-version: 26
 
-      - name: Install dependencies
-        run: npm install
-
-      - name: Pack oix
-        run: npm run pack
+      - name: Test and pack oix
+        run: npm run release
 
       - name: Upload oix to obox release
         env:

@@ -10,8 +10,5 @@
     "pack": "node scripts/pack.mjs",
     "check:feed": "node scripts/check-feed.mjs",
     "release": "npm run test && npm run pack"
-  },
-  "devDependencies": {
-    "adm-zip": "^0.6.0"
   }
 }
