@@ -21,7 +21,7 @@ const flush = () => new Promise((resolve) => setImmediate(resolve))
 
 /**
  * 构造 mock api。
- * overrides 可注入：version、resolveFeed(repo)、check(feedUrl)、download()（可返回/抛错）；
+ * overrides 可注入：version、resolveFeed(repo)、check(feedUrl)、download()、install(opts)（可返回/抛错）；
  * noResolveFeed: true 模拟旧宿主（api.update 无 resolveFeed）。
  */
 function createMockApi(overrides = {}) {
@@ -29,13 +29,14 @@ function createMockApi(overrides = {}) {
     statusText: null,
     statusHistory: [],
     tooltip: null,
-    commandId: null,
-    commandHandler: null,
+    /** 命令 id → handler（扩展注册的全部命令） */
+    commands: new Map(),
     eventListener: null,
-    disposed: { check: false, off: false },
+    disposed: { off: false },
     checkCalls: [],
     downloadCalls: 0,
-    resolveFeedCalls: []
+    resolveFeedCalls: [],
+    installCalls: []
   }
   const api = {
     statusBar: {
@@ -73,15 +74,25 @@ function createMockApi(overrides = {}) {
         state.downloadCalls++
         return overrides.download ? await overrides.download() : { ok: true }
       },
+      install: async (opts) => {
+        state.installCalls.push(opts)
+        return overrides.install
+          ? await overrides.install(opts)
+          : { ok: true, version: '1.0.1', filePath: 'C:\\tmp\\obox-setup.exe' }
+      },
       onEvent: (listener) => {
         state.eventListener = listener
         return { dispose: () => { state.disposed.off = true } }
       }
     },
     registerCommand: (id, handler) => {
-      state.commandId = id
-      state.commandHandler = handler
-      return { dispose: () => { state.disposed.check = true } }
+      state.commands.set(id, handler)
+      return {
+        dispose: () => {
+          state.disposed[id] = true
+          state.commands.delete(id)
+        }
+      }
     }
   }
   return { api, state }
@@ -97,24 +108,34 @@ function activate(overrides) {
 /** 激活并执行检查命令（等待完成与微任务刷完），返回 ctx */
 async function runCheck(overrides) {
   const ctx = activate(overrides)
-  await ctx.state.commandHandler()
+  await ctx.state.commands.get('obox-updater.check')()
   await flush()
   return ctx
 }
 
-test('激活：注册命令、订阅事件、设置状态栏初始文案，并显示当前版本', async () => {
+/** 激活并执行强制重装命令，返回 ctx */
+async function runForce(overrides) {
+  const ctx = activate(overrides)
+  await ctx.state.commands.get('obox-updater.forceReinstall')()
+  await flush()
+  return ctx
+}
+
+test('激活：注册全部 manifest 声明的命令、订阅事件、设置状态栏初始文案，并显示当前版本', async () => {
   const { state } = activate({ version: '1.0.0' })
   await flush()
-  assert.equal(state.commandId, 'obox-updater.check')
+  assert.ok(state.commands.has('obox-updater.check'), '应注册检查命令')
+  assert.ok(state.commands.has('obox-updater.forceReinstall'), '应注册强制重装命令')
   assert.ok(typeof state.eventListener === 'function', 'onEvent 应捕获监听器')
   assert.equal(state.tooltip, 'Obox 更新提供者')
   assert.equal(state.statusText, 'Obox v1.0.0')
 })
 
-test('注册的命令 id 与 manifest 声明一致', async () => {
+test('注册的命令集合与 manifest 声明完全一致', async () => {
   const { state } = activate()
   await flush()
-  assert.equal(state.commandId, manifest.contributes.commands[0].command)
+  const declared = manifest.contributes.commands.map((c) => c.command).sort()
+  assert.deepEqual([...state.commands.keys()].sort(), declared)
 })
 
 test('检查：检查失败（ok:false）→ 状态栏显示错误信息', async () => {
@@ -252,9 +273,82 @@ test('检查：旧宿主无 resolveFeed → 回退 manifest 的 latest/download 
   )
 })
 
-test('清理：返回的函数同时注销命令与事件订阅', async () => {
+test('清理：返回的函数同时注销全部命令与事件订阅', async () => {
   const { state, cleanup } = await runCheck()
   cleanup()
-  assert.equal(state.disposed.check, true)
+  assert.equal(state.disposed['obox-updater.check'], true)
+  assert.equal(state.disposed['obox-updater.forceReinstall'], true)
   assert.equal(state.disposed.off, true)
+  assert.equal(state.commands.size, 0)
+})
+
+// ---- 强制重装 / 回退到发布版 ----
+
+test('强制重装：以 force:true 与解析得到的 feedUrl 调用 install，并提示已启动安装', async () => {
+  const feedUrl = 'https://github.com/obox-org/obox/releases/download/v1.1.0/'
+  const { state } = await runForce({
+    resolveFeed: async () => ({ ok: true, tag: 'v1.1.0', feedUrl }),
+    install: async () => ({ ok: true, version: '1.1.0', filePath: 'C:\\tmp\\obox-setup.exe' })
+  })
+  assert.deepEqual(state.resolveFeedCalls, ['obox-org/obox'])
+  assert.equal(state.installCalls.length, 1)
+  assert.equal(state.installCalls[0].force, true, '必须走强制通道（绕开版本门控）')
+  assert.equal(state.installCalls[0].feedUrl, feedUrl)
+  assert.equal(state.statusText, '已启动安装 v1.1.0（按向导完成）')
+})
+
+test('强制重装：resolveFeed 不可用（旧宿主）→ 用 latest 兜底源', async () => {
+  const { state } = await runForce({ noResolveFeed: true })
+  assert.equal(state.resolveFeedCalls.length, 0)
+  assert.equal(state.installCalls.length, 1)
+  assert.equal(state.installCalls[0].feedUrl, 'https://github.com/obox-org/obox/releases/latest/download/')
+})
+
+test('强制重装：resolveFeed 返回 ok:false → 仍回落兜底源并继续', async () => {
+  const { state } = await runForce({
+    resolveFeed: async () => ({ ok: false, error: '仓库无 release' })
+  })
+  assert.equal(
+    state.installCalls[0].feedUrl,
+    'https://github.com/obox-org/obox/releases/latest/download/'
+  )
+})
+
+test('强制重装：install 返回 ok:false → 状态栏显示失败原因，且不谎报成功', async () => {
+  const { state } = await runForce({
+    install: async () => ({ ok: false, error: '安装包校验失败（sha512 不匹配），已删除下载文件' })
+  })
+  assert.equal(state.statusText, '强制重装失败: 安装包校验失败（sha512 不匹配），已删除下载文件')
+})
+
+test('强制重装：未选中为更新提供者（api 抛错）→ 提示去设置-更新选择', async () => {
+  const { state } = await runForce({
+    install: async () => {
+      throw new Error('当前扩展不是生效的更新提供者（需在设置-更新中选择）')
+    }
+  })
+  assert.equal(state.statusText, '未选择为更新提供者')
+})
+
+test('强制重装：其他异常 → 显示强制重装失败', async () => {
+  const { state } = await runForce({
+    install: async () => {
+      throw new Error('boom')
+    }
+  })
+  assert.equal(state.statusText, '强制重装失败')
+})
+
+test('强制重装：旧宿主忽略 force（install 无 version）→ 提示已触发安装（不显示空版本号）', async () => {
+  const { state } = await runForce({
+    resolveFeed: async () => ({ ok: true, tag: null, feedUrl: 'https://x/' }),
+    install: async () => ({ ok: true })
+  })
+  assert.equal(state.statusText, '已触发安装（按向导完成）')
+})
+
+test('强制重装：状态栏过程可见（准备强制重装 → 下载安装包）', async () => {
+  const { state } = await runForce()
+  assert.ok(state.statusHistory.includes('准备强制重装…'), '应显示准备状态')
+  assert.ok(state.statusHistory.includes('下载安装包…'), '应显示下载状态')
 })
