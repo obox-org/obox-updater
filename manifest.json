@@ -1,6 +1,6 @@
 {
   "name": "obox-updater",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "displayName": "Obox 更新",
   "author": "obox-org",
   "apiVersion": 1,
@@ -14,6 +14,12 @@
       {
         "command": "obox-updater.check",
         "title": "检查 Obox 更新",
+        "category": "更新",
+        "palette": true
+      },
+      {
+        "command": "obox-updater.forceReinstall",
+        "title": "强制重装 Obox（直接下载并运行安装包）",
         "category": "更新",
         "palette": true
       }
