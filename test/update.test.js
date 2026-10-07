@@ -27,6 +27,7 @@ const flush = () => new Promise((resolve) => setImmediate(resolve))
 function createMockApi(overrides = {}) {
   const state = {
     statusText: null,
+    statusHistory: [],
     tooltip: null,
     commandId: null,
     commandHandler: null,
@@ -41,6 +42,7 @@ function createMockApi(overrides = {}) {
       setText: (id, text) => {
         assert.equal(id, STATUS_ID)
         state.statusText = text
+        state.statusHistory.push(text)
       },
       setTooltip: (id, tooltip) => {
         assert.equal(id, STATUS_ID)
@@ -192,20 +194,51 @@ test('事件：error → 显示更新错误', () => {
   assert.equal(state.statusText, '更新错误: 签名校验失败')
 })
 
-test('检查：先解析最后一次编译的 release，再用其 feedUrl 检查更新', async () => {
-  const { state } = await runCheck()
-  assert.equal(state.resolveFeedCalls.length, 1)
-  assert.equal(state.resolveFeedCalls[0], 'obox-org/obox')
+test('检查：resolveFeed 以 obox-org/obox 解析，成功时用其返回的 feedUrl', async () => {
+  const feedUrl = 'https://github.com/obox-org/obox/releases/download/v1.1.0/'
+  const { state } = await runCheck({
+    resolveFeed: async (repo) => ({ ok: true, tag: 'v1.1.0', feedUrl }),
+    check: async () => ({ ok: true, available: false })
+  })
+  assert.deepEqual(state.resolveFeedCalls, ['obox-org/obox'])
   assert.equal(state.checkCalls.length, 1)
-  assert.equal(state.checkCalls[0], 'https://github.com/obox-org/obox/releases/download/v1.1.0/')
+  assert.equal(state.checkCalls[0], feedUrl)
 })
 
-test('检查：解析更新源失败 → 状态栏提示且不执行检查', async () => {
+test('检查：resolveFeed 返回 ok:false 时回落 latest 兜底源', async () => {
   const { state } = await runCheck({
-    resolveFeed: async () => ({ ok: false, error: 'GitHub API 返回 403' })
+    resolveFeed: async () => ({ ok: false, error: '仓库无 release' }),
+    check: async () => ({ ok: true, available: false })
   })
-  assert.equal(state.statusText, '解析更新源失败: GitHub API 返回 403')
-  assert.equal(state.checkCalls.length, 0)
+  assert.deepEqual(state.resolveFeedCalls, ['obox-org/obox'])
+  assert.equal(state.checkCalls.length, 1)
+  assert.equal(state.checkCalls[0], 'https://github.com/obox-org/obox/releases/latest/download/')
+  assert.equal(state.statusText, '已是最新')
+})
+
+test('检查：解析成功但已是最新 → 显示已是最新且不下载', async () => {
+  const feedUrl = 'https://github.com/obox-org/obox/releases/download/v1.0.0/'
+  const { state } = await runCheck({
+    resolveFeed: async () => ({ ok: true, tag: 'v1.0.0', feedUrl }),
+    check: async () => ({ ok: true, available: false })
+  })
+  assert.equal(state.checkCalls[0], feedUrl)
+  assert.equal(state.statusText, '已是最新')
+  assert.equal(state.downloadCalls, 0)
+})
+
+test('检查：发现新版时状态栏体现解析得到的 tag（发现新版 v1.1.0）', async () => {
+  const { state } = await runCheck({
+    resolveFeed: async () => ({
+      ok: true,
+      tag: 'v1.1.0',
+      feedUrl: 'https://github.com/obox-org/obox/releases/download/v1.1.0/'
+    }),
+    check: async () => ({ ok: true, available: '1.1.0' }),
+    download: async () => ({ ok: true })
+  })
+  assert.ok(state.statusHistory.includes('发现新版 v1.1.0'), '状态栏应出现发现新版 v1.1.0')
+  assert.equal(state.statusText, '已下载，重启安装')
 })
 
 test('检查：旧宿主无 resolveFeed → 回退 manifest 的 latest/download 更新源', async () => {
