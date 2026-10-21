@@ -55,9 +55,16 @@ export default function oboxUpdater(api) {
   // 状态栏：显示当前 obox 版本
   api.statusBar.setText(STATUS_ID, 'Obox')
   api.statusBar.setTooltip(STATUS_ID, 'Obox 更新提供者')
-  void api.update.getVersion().then((v) => {
-    api.statusBar.setText(STATUS_ID, `Obox v${v}`)
-  })
+  // 必须带 catch：宿主模式下 `update.getVersion` 是跨进程 RPC，main 回包不合形状时会 reject；
+  // 不 catch 就是一个 unhandled rejection（EH-D8a 用真实宿主运行时跑真扩展时实测触发）。
+  void api.update
+    .getVersion()
+    .then((v) => {
+      api.statusBar.setText(STATUS_ID, `Obox v${v}`)
+    })
+    .catch(() => {
+      // 拿不到版本就保持「Obox」占位，不影响其它功能
+    })
 
   /**
    * 解析更新源：优先动态解析最后一次编译的 release，失败（或旧宿主无 resolveFeed）回落 latest 兜底源。
