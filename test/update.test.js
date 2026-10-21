@@ -352,3 +352,84 @@ test('强制重装：状态栏过程可见（准备强制重装 → 下载安装
   assert.ok(state.statusHistory.includes('准备强制重装…'), '应显示准备状态')
   assert.ok(state.statusHistory.includes('下载安装包…'), '应显示下载状态')
 })
+
+// ---- 宿主模式：3 秒 ack 超时（长下载） ----
+//
+// 宿主里 `api.update.download()` / `install({force:true})` 是「宿主 → main」的内部 RPC，
+// ack 超时固定 3 秒（`ACK_TIMEOUT_MS`，只观测不杀），而整段下载要几分钟 ⇒ 这两个调用**必定**
+// 先收到 EH_TIMEOUT，然后 main 继续下载、完成经 update-downloaded 事件回来。
+// 这里的用例钉住"超时不能当失败"这条语义（代码依据见 index.js 的 isAckTimeout 注释）。
+
+/** 宿主 EH_TIMEOUT：真实形状是 `EhProtocolError`（带 `code`），文案与 obox 的 EH_ERROR_TEXT 一致 */
+const ACK_TIMEOUT_TEXT =
+  '对端在超时时间内没有响应。请检查该扩展是否阻塞了事件循环；必要时在扩展管理器里重启扩展宿主。'
+
+/** 带 code 的 EH_TIMEOUT（宿主原样抛出的形状） */
+function ackTimeoutError() {
+  const err = new Error(ACK_TIMEOUT_TEXT)
+  err.code = 'EH_TIMEOUT'
+  return err
+}
+
+/** 只有文案、没有 code 的等价错误（被中间层包成普通 Error 时的退化判据） */
+function ackTimeoutErrorByMessage() {
+  return new Error(ACK_TIMEOUT_TEXT)
+}
+
+test('宿主模式：download() 撞上 ack 超时 → 不报失败，状态栏停在"下载中…"（下载仍在 main 继续）', async () => {
+  const { state } = await runCheck({
+    check: async () => ({ ok: true, available: '1.1.0' }),
+    download: async () => {
+      throw ackTimeoutError()
+    }
+  })
+  assert.equal(state.statusText, '下载中…')
+  assert.ok(!state.statusHistory.some((t) => t.startsWith('下载失败')), '不得出现"下载失败"')
+  assert.ok(!state.statusHistory.includes('更新失败'), '不得出现"更新失败"')
+})
+
+test('宿主模式：check() 撞上 ack 超时（只有文案也能识别）→ 提示检查超时并重试', async () => {
+  const { state } = await runCheck({
+    check: async () => {
+      throw ackTimeoutErrorByMessage()
+    }
+  })
+  assert.equal(state.statusText, '检查超时，请重试')
+})
+
+test('宿主模式：install({force}) 撞上 ack 超时 → 提示等安装向导，不谎报强制重装失败', async () => {
+  const { state } = await runForce({
+    install: async () => {
+      throw ackTimeoutError()
+    }
+  })
+  assert.equal(state.statusText, '下载安装包中…（完成后自动打开安装向导）')
+  assert.ok(
+    !state.statusHistory.some((t) => t.startsWith('强制重装失败')),
+    '不得出现"强制重装失败"'
+  )
+})
+
+test('宿主模式：强制重装超时后，update-downloaded 事件说的是"已启动安装"而不是"重启安装"', async () => {
+  const { state } = await runForce({
+    install: async () => {
+      throw ackTimeoutError()
+    }
+  })
+  state.eventListener({ type: 'download-progress', percent: 42.4, bytesPerSecond: 0, transferred: 0, total: 0 })
+  assert.equal(state.statusText, '下载 42%')
+  state.eventListener({ type: 'update-downloaded', version: '1.1.0' })
+  assert.equal(state.statusText, '已启动安装 v1.1.0（按向导完成）')
+})
+
+test('宿主模式：强制重装标记不会污染之后的普通更新（检查命令会重置它）', async () => {
+  const { state } = await runForce({
+    install: async () => {
+      throw ackTimeoutError()
+    }
+  })
+  // 用户随后点"检查更新"：这次下载完成的事件应按普通更新解释
+  await state.commands.get('obox-updater.check')()
+  state.eventListener({ type: 'update-downloaded', version: '1.2.0' })
+  assert.equal(state.statusText, '已下载 v1.2.0，重启安装')
+})
