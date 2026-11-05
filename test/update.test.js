@@ -36,7 +36,11 @@ function createMockApi(overrides = {}) {
     checkCalls: [],
     downloadCalls: 0,
     resolveFeedCalls: [],
-    installCalls: []
+    installCalls: [],
+    /** api.net.get 调用（下载离线安装包用） */
+    netGetCalls: [],
+    /** api.net.download 调用（含 relPath 与 onExist） */
+    netDownloadCalls: []
   }
   const api = {
     statusBar: {
@@ -95,6 +99,28 @@ function createMockApi(overrides = {}) {
       }
     }
   }
+  // `api.net`（2.2.0 新增 get / download）：默认给可用实现，缺口用 overrides 关掉
+  const net = {}
+  if (!overrides.noNetGet) {
+    net.get = async (url) => {
+      state.netGetCalls.push(url)
+      return overrides.netGet
+        ? await overrides.netGet(url)
+        : {
+            ok: true,
+            data: 'version: 2.2.0\npath: Obox Setup 2.2.0.exe\nsha512: abc\n'
+          }
+    }
+  }
+  if (!overrides.noNetDownload) {
+    net.download = async (url, relPath, opts) => {
+      state.netDownloadCalls.push({ url, relPath, opts })
+      return overrides.netDownload
+        ? await overrides.netDownload(url, relPath, opts)
+        : { ok: true, path: relPath, bytes: 98 * 1024 * 1024 }
+    }
+  }
+  api.net = net
   return { api, state }
 }
 
@@ -121,11 +147,20 @@ async function runForce(overrides) {
   return ctx
 }
 
+/** 激活并执行「下载离线安装包」命令，返回 ctx */
+async function runDownloadInstaller(overrides) {
+  const ctx = activate(overrides)
+  await ctx.state.commands.get('obox-updater.downloadInstaller')()
+  await flush()
+  return ctx
+}
+
 test('激活：注册全部 manifest 声明的命令、订阅事件、设置状态栏初始文案，并显示当前版本', async () => {
   const { state } = activate({ version: '1.0.0' })
   await flush()
   assert.ok(state.commands.has('obox-updater.check'), '应注册检查命令')
   assert.ok(state.commands.has('obox-updater.forceReinstall'), '应注册强制重装命令')
+  assert.ok(state.commands.has('obox-updater.downloadInstaller'), '应注册下载离线安装包命令')
   assert.ok(typeof state.eventListener === 'function', 'onEvent 应捕获监听器')
   assert.equal(state.tooltip, 'Obox 更新提供者')
   assert.equal(state.statusText, 'Obox v1.0.0')
@@ -278,6 +313,7 @@ test('清理：返回的函数同时注销全部命令与事件订阅', async ()
   cleanup()
   assert.equal(state.disposed['obox-updater.check'], true)
   assert.equal(state.disposed['obox-updater.forceReinstall'], true)
+  assert.equal(state.disposed['obox-updater.downloadInstaller'], true)
   assert.equal(state.disposed.off, true)
   assert.equal(state.commands.size, 0)
 })
@@ -432,4 +468,77 @@ test('宿主模式：强制重装标记不会污染之后的普通更新（检�
   await state.commands.get('obox-updater.check')()
   state.eventListener({ type: 'update-downloaded', version: '1.2.0' })
   assert.equal(state.statusText, '已下载 v1.2.0，重启安装')
+})
+
+// ---- 下载离线安装包（api.net，obox 2.2.0 起） ----
+//
+// 这条命令把"读 latest.yml + 流式下载安装包"交给 `api.net.get` / `api.net.download`：
+// 下载上下文（扩展 id 与 data 目录）由宿主注入，扩展只给**相对路径** ⇒ 不需要绝对路径。
+
+test('下载离线安装包：读 latest.yml → download 落盘到 installers/<file>，状态栏显示路径与体积', async () => {
+  const { state } = await runDownloadInstaller()
+  assert.deepEqual(state.netGetCalls, [
+    'https://github.com/obox-org/obox/releases/download/v1.1.0/latest.yml'
+  ])
+  assert.equal(state.netDownloadCalls.length, 1)
+  assert.equal(
+    state.netDownloadCalls[0].url,
+    'https://github.com/obox-org/obox/releases/download/v1.1.0/Obox%20Setup%202.2.0.exe'
+  )
+  assert.equal(state.netDownloadCalls[0].relPath, 'installers/Obox Setup 2.2.0.exe')
+  assert.equal(state.netDownloadCalls[0].opts.onExist, 'overwrite', '重下一次应覆盖，不堆 (1) 副本')
+  assert.equal(state.statusText, '已下载安装包 v1.1.0：installers/Obox Setup 2.2.0.exe（98.0 MB）')
+})
+
+test('下载离线安装包：latest.yml 缺 path → 明确提示，不发起下载', async () => {
+  const { state } = await runDownloadInstaller({
+    netGet: async () => ({ ok: true, data: 'version: 2.2.0\nsha512: abc\n' })
+  })
+  assert.equal(state.statusText, '更新源缺少安装包文件名（latest.yml 的 path）')
+  assert.equal(state.netDownloadCalls.length, 0)
+})
+
+test('下载离线安装包：读取更新源失败（ok:false）→ 显示原因，不发起下载', async () => {
+  const { state } = await runDownloadInstaller({
+    netGet: async () => ({ ok: false, error: 'HTTP 404 Not Found' })
+  })
+  assert.equal(state.statusText, '读取更新源失败: HTTP 404 Not Found')
+  assert.equal(state.netDownloadCalls.length, 0)
+})
+
+test('下载离线安装包：download 返回 ok:false → 如实显示失败原因', async () => {
+  const { state } = await runDownloadInstaller({
+    netDownload: async () => ({ ok: false, error: '请求超时（30s）' })
+  })
+  assert.equal(state.statusText, '下载安装包失败: 请求超时（30s）')
+})
+
+test('下载离线安装包：老宿主没有 api.net.download → 明确提示需要 obox 2.2.0（不谎报网络失败）', async () => {
+  const { state } = await runDownloadInstaller({ noNetDownload: true })
+  // 命令同步返回，随后 getVersion 的 then 会把状态栏刷成版本号 ⇒ 断言过程历史里的那条提示
+  assert.ok(
+    state.statusHistory.includes('下载离线安装包需要 obox 2.2.0 及以上'),
+    '应提示需要 obox 2.2.0'
+  )
+  assert.equal(state.netGetCalls.length, 0, '能力缺失时不该先去读更新源')
+})
+
+test('下载离线安装包：download 抛错 → 显示下载安装包失败（不冒泡成 unhandled rejection）', async () => {
+  const { state } = await runDownloadInstaller({
+    netDownload: async () => {
+      throw new Error('EH_TIMEOUT')
+    }
+  })
+  assert.equal(state.statusText, '下载安装包失败')
+})
+
+test('下载离线安装包：resolveFeed 失败 → latest.yml 从 latest 兜底源读', async () => {
+  const { state } = await runDownloadInstaller({
+    resolveFeed: async () => ({ ok: false, error: '仓库无 release' })
+  })
+  assert.equal(
+    state.netGetCalls[0],
+    'https://github.com/obox-org/obox/releases/latest/download/latest.yml'
+  )
+  assert.equal(state.netDownloadCalls.length, 1)
 })

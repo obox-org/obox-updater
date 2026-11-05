@@ -16,10 +16,53 @@
 const REPO = 'obox-org/obox'
 // 兜底更新源：动态解析失败（或旧宿主无 resolveFeed）时使用 GitHub 的 latest 下载目录
 const FALLBACK_FEED_URL = 'https://github.com/obox-org/obox/releases/latest/download/'
+// 离线安装包的落盘目录（**相对本扩展 data 目录**，由宿主注入上下文，扩展不需要也不该知道绝对路径）
+const INSTALLER_DIR = 'installers'
 
 /** 归一化版本号显示：统一带 v 前缀（tag 通常已是 v1.2.3，available 可能不带） */
 function withV(version) {
   return typeof version === 'string' && version.startsWith('v') ? version : `v${version}`
+}
+
+/**
+ * 极简 `latest.yml` 解析：只取**顶层** `key: value`。
+ *
+ * electron-builder 生成的 latest.yml 是扁平的（version / files / path / sha512 / releaseDate），
+ * 本扩展运行期**零第三方依赖**（不引 YAML 库），也不该为了两个字段引一个解析器。
+ * `files:` 下的列表项以 `-` 开头（`- url: …`），不会被当成顶层键，因此不会污染结果。
+ */
+function parseLatestYml(text) {
+  const out = {}
+  for (const line of String(text ?? '').split(/\r?\n/)) {
+    const match = /^([A-Za-z0-9_.-]+):\s*(.*)$/.exec(line.trim())
+    if (!match) continue
+    out[match[1]] = match[2].trim().replace(/^['"]|['"]$/g, '')
+  }
+  return out
+}
+
+/** 体积显示（状态栏要短，不要抖出小数点后一堆 0） */
+function formatBytes(bytes) {
+  if (typeof bytes !== 'number' || !Number.isFinite(bytes) || bytes <= 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB']
+  let value = bytes
+  let unit = 0
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024
+    unit += 1
+  }
+  const shown = unit === 0 || value >= 100 ? Math.round(value) : value.toFixed(1)
+  return `${shown} ${units[unit]}`
+}
+
+/** `latest.yml` 的 `path` → 安装包 URL（可能是相对路径，也可能已经是绝对 URL） */
+function installerUrlOf(feedUrl, filePath) {
+  if (/^https?:\/\//i.test(filePath)) return filePath
+  try {
+    return new URL(filePath, feedUrl).toString()
+  } catch {
+    return `${feedUrl.replace(/\/+$/, '')}/${String(filePath).replace(/^\/+/, '')}`
+  }
 }
 
 /**
@@ -176,6 +219,70 @@ export default function oboxUpdater(api) {
     }
   })
 
+  /**
+   * 命令：下载离线安装包（走 `api.net`，自动使用设置里配置的代理）。
+   *
+   * 为什么单独一条命令、而不是复用 `update.install({force:true})`：那条链路把"下载 + 校验 + 启动安装"
+   * 全塞进一次跨进程 RPC（宿主模式 3 秒 ack 超时，见 §5），既看不到进度也拿不到失败原因。
+   * 这里用 2.2.0 新增的 `api.net.get` / `api.net.download` 自己把安装包**流式落盘**到本扩展的
+   * data 目录（`installers/` 子目录）——下载上下文由宿主按扩展注入，扩展只给相对路径，
+   * 因此不需要知道 data 目录的绝对路径。
+   */
+  const downloadInstaller = api.registerCommand('obox-updater.downloadInstaller', async () => {
+    api.statusBar.setText(STATUS_ID, '准备下载安装包…')
+    // 纯加法能力：老宿主没有 api.net.download，明确说清"要升到 2.2.0"，不要装作网络失败
+    if (typeof api.net?.download !== 'function') {
+      api.statusBar.setText(STATUS_ID, '下载离线安装包需要 obox 2.2.0 及以上')
+      return
+    }
+    try {
+      const { feedUrl, tag } = await resolveFeedUrl()
+      api.statusBar.setText(STATUS_ID, '读取更新源…')
+      const meta = await netGet(installerUrlOf(feedUrl, 'latest.yml'))
+      if (!meta || !meta.ok) {
+        api.statusBar.setText(STATUS_ID, `读取更新源失败: ${(meta && meta.error) || '未知错误'}`)
+        return
+      }
+      const yml = parseLatestYml(meta.data)
+      const fileName = String(yml.path || '').split('/').pop()
+      if (!fileName) {
+        api.statusBar.setText(STATUS_ID, '更新源缺少安装包文件名（latest.yml 的 path）')
+        return
+      }
+      api.statusBar.setText(STATUS_ID, `下载安装包 ${fileName}…`)
+      const result = await api.net.download(
+        installerUrlOf(feedUrl, yml.path),
+        `${INSTALLER_DIR}/${fileName}`,
+        // 同一版本重下一次：覆盖即可（`rename` 会堆出一串 `xxx (1).exe`，用户反而找不到最新那个）
+        { onExist: 'overwrite' }
+      )
+      if (!result || !result.ok) {
+        api.statusBar.setText(STATUS_ID, `下载安装包失败: ${(result && result.error) || '未知错误'}`)
+        return
+      }
+      const size = formatBytes(result.bytes)
+      const version = tag ? withV(tag) : ''
+      api.statusBar.setText(
+        STATUS_ID,
+        version
+          ? `已下载安装包 ${version}：${result.path}（${size}）`
+          : `已下载安装包 ${result.path}（${size}）`
+      )
+    } catch (err) {
+      api.statusBar.setText(STATUS_ID, errorText(err, '下载安装包失败'))
+      console.error('[obox-updater] download installer failed', err)
+    }
+  })
+
+  /**
+   * 读更新源里的文本文件（`latest.yml`）：优先用 2.2.0 的 `api.net.get`，
+   * 老宿主没有它时退回一直存在的 `api.net.fetch`（同一条代理链路）。
+   */
+  async function netGet(url) {
+    if (typeof api.net?.get === 'function') return api.net.get(url)
+    return api.net.fetch(url, { method: 'GET' })
+  }
+
   // 订阅更新事件（进度/完成）
   const off = api.update.onEvent((e) => {
     if (e.type === 'download-progress') {
@@ -200,6 +307,7 @@ export default function oboxUpdater(api) {
   return () => {
     check.dispose()
     forceReinstall.dispose()
+    downloadInstaller.dispose()
     off.dispose()
   }
 }
